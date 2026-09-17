@@ -61,9 +61,25 @@ curl -sD - -o /dev/null https://gen.pollinations.ai/v1/responses \
 # x-router-why: cheapest healthy model at fast tier; 100% ok, p95 27s, 62 tok/s; ~7 input tokens; skipped amazon/nova-micro-v1 (no /v1/responses)
 ```
 
-Alongside the headers the agent logs the same decision as one JSON line, so the choice
-is still on record when a gateway in front of it serves a cached answer and drops
-per-response headers.
+A JSON answer also carries the same trace in its body, so a caller that never sees
+response headers can still check the routing:
+
+```json
+{
+  "model": "openai/gpt-oss-20b",
+  "output": [ "..." ],
+  "router": {
+    "model": "openai/gpt-oss-20b",
+    "tier": "fast",
+    "why": "cheapest healthy model at fast tier; 100% ok, p95 27s, 62 tok/s; ~7 input tokens; skipped amazon/nova-micro-v1 (no /v1/responses)",
+    "pool": "(every candidate with its score and health note)"
+  }
+}
+```
+
+Streamed answers are passed through untouched and only get headers. The agent also logs
+the decision as one JSON line, so the choice stays on record when a gateway caches the
+answer and drops per-response headers.
 
 ## Design choice: curated pools, live decisions
 
@@ -89,7 +105,7 @@ For automatic sync after a push, enable GitHub Actions and set the repository **
 node --test agent.test.ts
 ```
 
-The tests drive the agent with a fake `pollinations` helper: seven cases cover tier selection,
+The tests drive the agent with a fake `pollinations` helper: eight cases cover tier selection,
 endpoint-aware selection, vision filtering, degradation avoidance, escalation and
 request pass-through.
 

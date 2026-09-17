@@ -345,7 +345,11 @@ async function forward(
 	});
 }
 
-function withTrace(response: Response, decision: Decision, escalated: string): Response {
+async function withTrace(
+	response: Response,
+	decision: Decision,
+	escalated: string,
+): Promise<Response> {
 	// Log as well as set headers: a gateway in front of the agent may cache the
 	// answer and drop per-response headers, but the log keeps the decision on record.
 	console.log(
@@ -356,6 +360,16 @@ function withTrace(response: Response, decision: Decision, escalated: string): R
 			why: decision.why,
 		}),
 	);
+
+	const router: Record<string, unknown> = {
+		model: decision.model,
+		tier: decision.tier,
+		why: decision.why,
+	};
+	if (decision.pool) router.pool = decision.pool.slice(0, 900);
+	if (decision.degraded.length > 0) router.degraded = decision.degraded;
+	if (escalated) router.escalated_to = escalated;
+
 	const headers = new Headers(response.headers);
 	headers.set("x-router-model", decision.model);
 	headers.set("x-router-tier", decision.tier);
@@ -365,11 +379,27 @@ function withTrace(response: Response, decision: Decision, escalated: string): R
 		headers.set("x-router-degraded", decision.degraded.join(", "));
 	}
 	if (escalated) headers.set("x-router-escalated-to", escalated);
-	return new Response(response.body, {
-		status: response.status,
-		statusText: response.statusText,
-		headers,
-	});
+
+	// A JSON answer also carries the trace in the body, so a caller that never sees
+	// response headers can still check the routing. Streamed answers are passed
+	// through untouched.
+	const type = response.headers.get("content-type") ?? "";
+	if (!type.includes("application/json")) {
+		return new Response(response.body, {
+			status: response.status,
+			statusText: response.statusText,
+			headers,
+		});
+	}
+	try {
+		const payload = (await response.json()) as Record<string, unknown>;
+		return Response.json({ ...payload, router }, { status: response.status, headers });
+	} catch {
+		return Response.json(
+			{ error: { message: "Router could not read the model answer" }, router },
+			{ status: response.status, headers },
+		);
+	}
 }
 
 export default async function agent({
@@ -396,7 +426,7 @@ export default async function agent({
 			response = null;
 		}
 		if (response && response.status !== 429 && response.status < 500) {
-			return withTrace(response, decision, escalated);
+			return await withTrace(response, decision, escalated);
 		}
 		last = response;
 	}
@@ -407,5 +437,5 @@ export default async function agent({
 			{ status: 502, headers: { "x-router-model": decision.model } },
 		);
 	}
-	return withTrace(last, decision, escalated);
+	return await withTrace(last, decision, escalated);
 }

@@ -218,6 +218,23 @@ test("a 5xx from the chosen model escalates one tier and reports it", async () =
 	assert.equal(response.status, 200);
 });
 
+test("the answer carries the routing trace in its body", async () => {
+	resetSignalCache();
+	const { pollinations } = harness({
+		respond: () => Response.json({ output: [], model: "openai/gpt-oss-20b" }),
+	});
+	const response = await agent({
+		request: responsesRequest({ input: "Say hello in one word." }),
+		pollinations,
+	});
+	const body = (await response.json()) as { router?: Record<string, unknown> };
+
+	assert.equal(body.router?.model, "openai/gpt-oss-20b");
+	assert.equal(body.router?.tier, "fast");
+	assert.match(String(body.router?.why), /cheapest healthy/);
+	assert.equal(response.headers.get("x-router-model"), "openai/gpt-oss-20b");
+});
+
 test("the original request is forwarded unchanged apart from the model", async () => {
 	resetSignalCache();
 	const { pollinations, forwarded } = harness({});
