@@ -145,14 +145,18 @@ function priceOf(model: ModelInfo | undefined): number {
 /**
  * Reliability multiplier on a model's advertised price: 1 means "as advertised",
  * higher means "expect to pay again after a failure, or to wait".
+ *
+ * Only 2xx and 5xx count as outcomes: a 4xx is a caller-side mistake and says
+ * nothing about whether the model is healthy.
  */
 function penaltyOf(row: StatusRow | undefined): { penalty: number; note: string } {
 	if (!row || num(row.total_requests) < 5) {
 		return { penalty: 1, note: "no recent traffic" };
 	}
-	const requests = Math.max(num(row.total_requests), 1);
-	const errRate = num(row.errors_5xx) / requests;
-	const okRate = num(row.status_2xx) / requests;
+	const outcomes = num(row.status_2xx) + num(row.errors_5xx);
+	if (outcomes < 5) return { penalty: 1, note: "no recent outcomes" };
+	const errRate = num(row.errors_5xx) / outcomes;
+	const okRate = num(row.status_2xx) / outcomes;
 	const rescueRate = num(row.fallback_rescues) / Math.max(num(row.served), 1);
 	const p95 = num(row.latency_p95_ms);
 	const tps = num(row.tokens_per_second);
@@ -163,7 +167,7 @@ function penaltyOf(row: StatusRow | undefined): { penalty: number; note: string 
 		(1 + 6 * errRate) * (1 + 3 * rescueRate) * latency * slowTail * throughput;
 
 	const notes: string[] = [`${(okRate * 100).toFixed(0)}% ok`];
-	if (errRate > 0) notes.push(`${(errRate * 100).toFixed(0)}% 5xx`);
+	if (errRate > 0) notes.push(`${(errRate * 100).toFixed(1)}% 5xx`);
 	if (num(row.fallback_rescues) > 0) notes.push(`${row.fallback_rescues} rescues`);
 	if (p95 > 0) notes.push(`p95 ${Math.round(p95 / 1000)}s`);
 	if (tps > 0) notes.push(`${tps.toFixed(0)} tok/s`);
@@ -330,6 +334,16 @@ async function forward(
 }
 
 function withTrace(response: Response, decision: Decision, escalated: string): Response {
+	// Log as well as set headers: a gateway in front of the agent may cache the
+	// answer and drop per-response headers, but the log keeps the decision on record.
+	console.log(
+		JSON.stringify({
+			route: decision.model,
+			tier: decision.tier,
+			escalated: escalated || undefined,
+			why: decision.why,
+		}),
+	);
 	const headers = new Headers(response.headers);
 	headers.set("x-router-model", decision.model);
 	headers.set("x-router-tier", decision.tier);
