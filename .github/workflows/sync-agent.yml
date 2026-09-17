@@ -1,0 +1,15 @@
+name: Sync agent
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  sync:
+    if: ${{ vars.POLLINATIONS_SYNC_URL != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy latest agent.ts
+        env:
+          POLLINATIONS_SYNC_URL: ${{ vars.POLLINATIONS_SYNC_URL }}
+        run: curl --fail --silent --show-error --request POST --url "$POLLINATIONS_SYNC_URL"
