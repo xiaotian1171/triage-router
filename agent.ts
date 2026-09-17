@@ -235,7 +235,7 @@ function rank(
 	body: Body,
 	signals: Signals,
 ): { candidates: Candidate[]; rejected: Candidate[]; needVision: boolean; tokens: number } {
-	const path = forwardPath(body);
+	const path = "/v1/responses";
 	const needVision = hasImage(body.input) || hasImage(body.messages);
 	const tokens = Math.ceil(promptText(body).length / 4);
 	const candidates: Candidate[] = [];
@@ -327,9 +327,39 @@ function pick(tier: Tier, body: Body, signals: Signals): Decision {
 	return { tier, model: chosen.id, why, pool, degraded };
 }
 
-/** Callers reach a router as a model, so honour whichever API shape they used. */
-function forwardPath(body: Body): string {
-	return Array.isArray(body.messages) ? "/v1/chat/completions" : "/v1/responses";
+/**
+ * Callers reach a router as a model, and the agent gateway normalises incoming
+ * requests to the Responses API before the agent sees them, so the router
+ * answers in that shape. A chat-style body is converted rather than rejected.
+ */
+function asResponses(body: Body): Body {
+	if (body.input !== undefined) return body;
+	const messages = Array.isArray(body.messages) ? body.messages : [];
+	const input = messages
+		.filter((message) => message && typeof message === "object")
+		.map((message) => {
+			const record = message as Record<string, unknown>;
+			const content = record.content;
+			if (typeof content !== "string") return record;
+			return { ...record, content: [{ type: "input_text", text: content }] };
+		});
+	const { messages: _messages, max_tokens, ...rest } = body;
+	return {
+		...rest,
+		input: input.length > 0 ? input : [{ role: "user", content: [{ type: "input_text", text: "" }] }],
+		...(max_tokens !== undefined ? { max_output_tokens: max_tokens } : {}),
+	} as Body;
+}
+
+/**
+ * Some upstreams only accept a plain prompt string for `input`, and reject a
+ * message array with 422. Flattening the conversation keeps the same ask in a
+ * shape every upstream accepts, so a model is never dropped over input syntax.
+ */
+function flattenInput(body: Body): Body {
+	const text = promptText(body).trim();
+	const { input: _input, messages: _messages, instructions: _instructions, ...rest } = body;
+	return { ...rest, input: text || " " } as Body;
 }
 
 async function forward(
@@ -337,8 +367,7 @@ async function forward(
 	model: string,
 	pollinations: AgentContext["pollinations"],
 ): Promise<Response> {
-	const path = forwardPath(body);
-	return pollinations(path, {
+	return pollinations("/v1/responses", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ ...body, model }),
@@ -349,6 +378,7 @@ async function withTrace(
 	response: Response,
 	decision: Decision,
 	escalated: string,
+	normalized = false,
 ): Promise<Response> {
 	// Log as well as set headers: a gateway in front of the agent may cache the
 	// answer and drop per-response headers, but the log keeps the decision on record.
@@ -366,6 +396,7 @@ async function withTrace(
 		tier: decision.tier,
 		why: decision.why,
 	};
+	if (normalized) router.input_normalized = true;
 	if (decision.pool) router.pool = decision.pool.slice(0, 900);
 	if (decision.degraded.length > 0) router.degraded = decision.degraded;
 	if (escalated) router.escalated_to = escalated;
@@ -379,6 +410,7 @@ async function withTrace(
 		headers.set("x-router-degraded", decision.degraded.join(", "));
 	}
 	if (escalated) headers.set("x-router-escalated-to", escalated);
+	if (normalized) headers.set("x-router-input-normalized", "true");
 
 	// A JSON answer also carries the trace in the body, so a caller that never sees
 	// response headers can still check the routing. Streamed answers are passed
@@ -406,12 +438,13 @@ export default async function agent({
 	request,
 	pollinations,
 }: AgentContext): Promise<Response> {
-	const body = (await request.json()) as Body;
+	const body = asResponses((await request.json()) as Body);
 	const signals = await loadSignals(pollinations);
 	const start = classify(body);
 
 	let decision = pick(start.tier, body, signals);
 	let escalated = "";
+	let normalized = false;
 	let last: Response | null = null;
 
 	for (const tier of [start.tier, ...ESCALATION[start.tier]]) {
@@ -422,11 +455,16 @@ export default async function agent({
 		let response: Response | null = null;
 		try {
 			response = await forward(body, decision.model, pollinations);
+			// 422: the upstream would not take a message array. Same ask, plain prompt.
+			if (response.status === 422) {
+				normalized = true;
+				response = await forward(flattenInput(body), decision.model, pollinations);
+			}
 		} catch {
 			response = null;
 		}
-		if (response && response.status !== 429 && response.status < 500) {
-			return await withTrace(response, decision, escalated);
+		if (response && response.status !== 429 && response.status < 500 && response.status !== 422) {
+			return await withTrace(response, decision, escalated, normalized);
 		}
 		last = response;
 	}
@@ -437,5 +475,5 @@ export default async function agent({
 			{ status: 502, headers: { "x-router-model": decision.model } },
 		);
 	}
-	return await withTrace(last, decision, escalated);
+	return await withTrace(last, decision, escalated, normalized);
 }

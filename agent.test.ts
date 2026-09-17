@@ -126,7 +126,7 @@ test("a short plain request goes to the cheapest healthy fast model that serves 
 	assert.match(response.headers.get("x-router-why") ?? "", /cheapest healthy/);
 });
 
-test("the same request through Chat Completions picks the chat-only model", async () => {
+test("a chat-style body is answered through the Responses API", async () => {
 	resetSignalCache();
 	const { pollinations, forwarded } = harness({});
 	const response = await agent({
@@ -134,9 +134,34 @@ test("the same request through Chat Completions picks the chat-only model", asyn
 		pollinations,
 	});
 
-	assert.equal(forwarded[0].path, "/v1/chat/completions");
-	assert.equal(forwarded[0].model, "amazon/nova-micro-v1");
+	assert.equal(forwarded.length, 1);
+	assert.equal(forwarded[0].path, "/v1/responses");
+	// Chat-only models are out of reach even though one is the cheapest fast model.
+	assert.equal(forwarded[0].model, "openai/gpt-oss-20b");
+	assert.deepEqual(forwarded[0].input, [
+		{ role: "user", content: [{ type: "input_text", text: "Say hello." }] },
+	]);
 	assert.equal(response.headers.get("x-router-tier"), "fast");
+});
+
+test("an upstream that rejects the message array is retried with a plain prompt", async () => {
+	resetSignalCache();
+	const { pollinations, forwarded } = harness({
+		respond: (body) =>
+			Array.isArray(body.input)
+				? new Response("unprocessable", { status: 422 })
+				: Response.json({ ok: true }),
+	});
+	const response = await agent({
+		request: responsesRequest({ input: [{ role: "user", content: "Say hello in one word." }] }),
+		pollinations,
+	});
+
+	assert.equal(forwarded.length, 2);
+	assert.equal(forwarded[1].model, "openai/gpt-oss-20b");
+	assert.equal(typeof forwarded[1].input, "string");
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get("x-router-input-normalized"), "true");
 });
 
 test("a long coding request goes to the strongest healthy deep model", async () => {
@@ -182,9 +207,7 @@ test("an image request is routed to a vision model even at fast tier", async () 
 test("a degrading model loses to a slower but healthy sibling", async () => {
 	resetSignalCache();
 	const status = healthy().map((row) =>
-		row.model === "amazon/nova-micro-v1"
-			? { ...row, status_2xx: 10, errors_5xx: 90 }
-			: row,
+		row.model === "openai/gpt-oss-20b" ? { ...row, status_2xx: 10, errors_5xx: 90 } : row,
 	);
 	const { pollinations, forwarded } = harness({ status });
 	const response = await agent({
@@ -192,8 +215,8 @@ test("a degrading model loses to a slower but healthy sibling", async () => {
 		pollinations,
 	});
 
-	assert.equal(forwarded[0].model, "openai/gpt-oss-20b");
-	assert.match(response.headers.get("x-router-degraded") ?? "", /nova-micro-v1/);
+	assert.equal(forwarded[0].model, "openai/gpt-5-nano");
+	assert.match(response.headers.get("x-router-degraded") ?? "", /gpt-oss-20b/);
 });
 
 test("a 5xx from the chosen model escalates one tier and reports it", async () => {
