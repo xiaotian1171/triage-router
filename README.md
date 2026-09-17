@@ -8,6 +8,7 @@ It routes on three signals, all read live at request time:
 | Task tier | the request itself (length, code, tools, images, reasoning words) | picking which pool to draw from |
 | Model health | `GET /models/status?minutes=30` (rollup rows) | moving traffic off a model that is degrading |
 | Price | `GET /v1/models` (`promptTextTokens` + `completionTextTokens`) | picking the cheapest model that clears the tier |
+| API shape | the request (Responses vs Chat Completions) | skipping models that cannot serve that endpoint |
 
 Callable model: **`xiaotian1171/triage-router`**
 
@@ -30,8 +31,11 @@ Callable model: **`xiaotian1171/triage-router`**
    A model with `penalty ≥ 6` is marked **degraded** and only used if its whole pool is degraded.
 3. **Pick.** `deep` takes the strongest healthy model (price is the capability proxy);
    `fast` and `balanced` take the cheapest healthy model that fits. Pool members that are
-   missing from the live catalog, cannot take images for an image request, or have too small
-   a context window are skipped and named in the reason.
+   missing from the live catalog, cannot serve the endpoint the caller used, cannot take
+   images for an image request, or have too small a context window are skipped and named in
+   the reason. `amazon/nova-micro-v1` is a worked example of the endpoint gate: it is the
+   cheapest model in the fast pool but is only listed under `/v1/chat/completions`, so
+   Responses calls go to `openai/gpt-oss-20b` and Chat Completions calls get nova-micro.
 4. **Escalate.** A 429 or 5xx from the chosen model re-runs the pick one tier up
    (`fast → balanced → deep`) and reports the escalation.
 
@@ -51,11 +55,15 @@ Every answer carries headers, so one call shows both the answer and the reasonin
 ```bash
 curl -sD - -o /dev/null https://gen.pollinations.ai/v1/responses \
   -H "Authorization: Bearer $POLLINATIONS_KEY" -H "content-type: application/json" \
-  -d '{"model":"xiaotian1171/triage-router","input":"Name three colours."}'
+  -d '{"model":"xiaotian1171/triage-router","input":"Name three colours, one word each."}'
 # x-router-tier: fast
-# x-router-model: amazon/nova-micro-v1
-# x-router-why: cheapest healthy model at fast tier; 100% ok, p95 2s, 164 tok/s; ~1 input tokens
+# x-router-model: openai/gpt-oss-20b
+# x-router-why: cheapest healthy model at fast tier; 100% ok, p95 27s, 62 tok/s; ~7 input tokens; skipped amazon/nova-micro-v1 (no /v1/responses)
 ```
+
+Alongside the headers the agent logs the same decision as one JSON line, so the choice
+is still on record when a gateway in front of it serves a cached answer and drops
+per-response headers.
 
 ## Design choice: curated pools, live decisions
 
@@ -81,7 +89,8 @@ For automatic sync after a push, enable GitHub Actions and set the repository **
 node --test agent.test.ts
 ```
 
-The tests drive the agent with a fake `pollinations` helper: six cases cover tier selection,
-vision filtering, degradation avoidance, escalation and request pass-through.
+The tests drive the agent with a fake `pollinations` helper: seven cases cover tier selection,
+endpoint-aware selection, vision filtering, degradation avoidance, escalation and
+request pass-through.
 
 [Agent guide](https://github.com/pollinations/pollinations/blob/main/BUILD_YOUR_OWN_AGENT.md) · [More examples](https://github.com/orgs/pollinations/repositories?q=topic%3Apollinations-code-agent-example)

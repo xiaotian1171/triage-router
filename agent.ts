@@ -33,6 +33,7 @@ type ModelInfo = {
 	id: string;
 	context_length?: number;
 	input_modalities?: string[];
+	supported_endpoints?: string[];
 	pricing?: Record<string, string>;
 };
 
@@ -234,6 +235,7 @@ function rank(
 	body: Body,
 	signals: Signals,
 ): { candidates: Candidate[]; rejected: Candidate[]; needVision: boolean; tokens: number } {
+	const path = forwardPath(body);
 	const needVision = hasImage(body.input) || hasImage(body.messages);
 	const tokens = Math.ceil(promptText(body).length / 4);
 	const candidates: Candidate[] = [];
@@ -247,6 +249,11 @@ function rank(
 		// A pool member the catalog no longer lists is dropped, not priced at zero.
 		if (signals.models.size > 0 && !info) {
 			rejected.push({ ...candidate, note: "not in catalog" });
+			continue;
+		}
+		const endpoints = info?.supported_endpoints ?? [];
+		if (endpoints.length > 0 && !endpoints.includes(path)) {
+			rejected.push({ ...candidate, note: `no ${path}` });
 			continue;
 		}
 		if (needVision && !(info?.input_modalities ?? []).includes("image")) {
@@ -320,12 +327,17 @@ function pick(tier: Tier, body: Body, signals: Signals): Decision {
 	return { tier, model: chosen.id, why, pool, degraded };
 }
 
+/** Callers reach a router as a model, so honour whichever API shape they used. */
+function forwardPath(body: Body): string {
+	return Array.isArray(body.messages) ? "/v1/chat/completions" : "/v1/responses";
+}
+
 async function forward(
 	body: Body,
 	model: string,
 	pollinations: AgentContext["pollinations"],
 ): Promise<Response> {
-	const path = Array.isArray(body.messages) ? "/v1/chat/completions" : "/v1/responses";
+	const path = forwardPath(body);
 	return pollinations(path, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
