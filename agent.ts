@@ -91,7 +91,10 @@ const HARD_WORDS =
 
 const CACHE_MS = 60_000;
 
-type Signals = { models: Map<string, ModelInfo>; status: Map<string, StatusRow> };
+type Signals = {
+	models: Map<string, ModelInfo>;
+	status: Map<string, StatusRow>;
+};
 
 let cache: (Signals & { at: number }) | null = null;
 
@@ -102,7 +105,9 @@ export function resetSignalCache(): void {
 
 function num(value: unknown, fallback = 0): number {
 	const parsed = typeof value === "string" ? Number(value) : value;
-	return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : fallback;
+	return typeof parsed === "number" && Number.isFinite(parsed)
+		? parsed
+		: fallback;
 }
 
 async function loadSignals(
@@ -150,7 +155,10 @@ function priceOf(model: ModelInfo | undefined): number {
  * Only 2xx and 5xx count as outcomes: a 4xx is a caller-side mistake and says
  * nothing about whether the model is healthy.
  */
-function penaltyOf(row: StatusRow | undefined): { penalty: number; note: string } {
+function penaltyOf(row: StatusRow | undefined): {
+	penalty: number;
+	note: string;
+} {
 	if (!row || num(row.total_requests) < 5) {
 		return { penalty: 1, note: "no recent traffic" };
 	}
@@ -165,11 +173,16 @@ function penaltyOf(row: StatusRow | undefined): { penalty: number; note: string 
 	const slowTail = okRate < 0.5 ? 1 + 4 * (1 - okRate) : 1;
 	const throughput = tps > 0 && tps < 10 ? 1 + (10 - tps) / 10 : 1;
 	const penalty =
-		(1 + 6 * errRate) * (1 + 3 * rescueRate) * latency * slowTail * throughput;
+		(1 + 6 * errRate) *
+		(1 + 3 * rescueRate) *
+		latency *
+		slowTail *
+		throughput;
 
 	const notes: string[] = [`${(okRate * 100).toFixed(0)}% ok`];
 	if (errRate > 0) notes.push(`${(errRate * 100).toFixed(1)}% 5xx`);
-	if (num(row.fallback_rescues) > 0) notes.push(`${row.fallback_rescues} rescues`);
+	if (num(row.fallback_rescues) > 0)
+		notes.push(`${row.fallback_rescues} rescues`);
 	if (p95 > 0) notes.push(`p95 ${Math.round(p95 / 1000)}s`);
 	if (tps > 0) notes.push(`${tps.toFixed(0)} tok/s`);
 	return { penalty, note: notes.join(", ") };
@@ -222,8 +235,10 @@ function classify(body: Body): { tier: Tier; why: string } {
 			}${hard ? ", reasoning ask" : ""})`,
 		};
 	}
-	if (image) return { tier: "balanced", why: "image input needs a vision model" };
-	if (tools > 0) return { tier: "balanced", why: `${tools} tool(s) to drive` };
+	if (image)
+		return { tier: "balanced", why: "image input needs a vision model" };
+	if (tools > 0)
+		return { tier: "balanced", why: `${tools} tool(s) to drive` };
 	if (chars < 320 && !code) {
 		return { tier: "fast", why: `short plain request (${chars} chars)` };
 	}
@@ -234,7 +249,12 @@ function rank(
 	tier: Tier,
 	body: Body,
 	signals: Signals,
-): { candidates: Candidate[]; rejected: Candidate[]; needVision: boolean; tokens: number } {
+): {
+	candidates: Candidate[];
+	rejected: Candidate[];
+	needVision: boolean;
+	tokens: number;
+} {
 	const path = "/v1/responses";
 	const needVision = hasImage(body.input) || hasImage(body.messages);
 	const tokens = Math.ceil(promptText(body).length / 4);
@@ -245,7 +265,13 @@ function rank(
 		const info = signals.models.get(id);
 		const { penalty, note } = penaltyOf(signals.status.get(id));
 		const price = priceOf(info);
-		const candidate: Candidate = { id, price, penalty, score: price * penalty, note };
+		const candidate: Candidate = {
+			id,
+			price,
+			penalty,
+			score: price * penalty,
+			note,
+		};
 		// A pool member the catalog no longer lists is dropped, not priced at zero.
 		if (signals.models.size > 0 && !info) {
 			rejected.push({ ...candidate, note: "not in catalog" });
@@ -270,7 +296,11 @@ function rank(
 }
 
 function pick(tier: Tier, body: Body, signals: Signals): Decision {
-	const { candidates, rejected, needVision, tokens } = rank(tier, body, signals);
+	const { candidates, rejected, needVision, tokens } = rank(
+		tier,
+		body,
+		signals,
+	);
 
 	if (candidates.length === 0) {
 		const next = ESCALATION[tier][0];
@@ -283,13 +313,9 @@ function pick(tier: Tier, body: Body, signals: Signals): Decision {
 				}`,
 			};
 		}
-		return {
-			tier,
-			model: POOLS[tier][0],
-			why: "pool empty, using tier default",
-			pool: "",
-			degraded: [],
-		};
+		throw new Error(
+			"No compatible model in the router pools can serve this request",
+		);
 	}
 
 	const healthy = candidates.filter((candidate) => candidate.penalty < 6);
@@ -316,8 +342,8 @@ function pick(tier: Tier, body: Body, signals: Signals): Decision {
 		tier === "deep"
 			? "strongest healthy model"
 			: tier === "fast"
-				? "cheapest healthy model"
-				: "cheapest healthy model that fits";
+			  ? "cheapest healthy model"
+			  : "cheapest healthy model that fits";
 	const why = `${tierReason} at ${tier} tier; ${chosen.note}; ~${tokens} input tokens${
 		rejected.length > 0
 			? `; skipped ${rejected.map((row) => `${row.id} (${row.note})`).join(", ")}`
@@ -341,25 +367,25 @@ function asResponses(body: Body): Body {
 			const record = message as Record<string, unknown>;
 			const content = record.content;
 			if (typeof content !== "string") return record;
-			return { ...record, content: [{ type: "input_text", text: content }] };
+			return {
+				...record,
+				content: [{ type: "input_text", text: content }],
+			};
 		});
 	const { messages: _messages, max_tokens, ...rest } = body;
 	return {
 		...rest,
-		input: input.length > 0 ? input : [{ role: "user", content: [{ type: "input_text", text: "" }] }],
+		input:
+			input.length > 0
+				? input
+				: [
+					  {
+						  role: "user",
+						  content: [{ type: "input_text", text: "" }],
+					  },
+				  ],
 		...(max_tokens !== undefined ? { max_output_tokens: max_tokens } : {}),
 	} as Body;
-}
-
-/**
- * Some upstreams only accept a plain prompt string for `input`, and reject a
- * message array with 422. Flattening the conversation keeps the same ask in a
- * shape every upstream accepts, so a model is never dropped over input syntax.
- */
-function flattenInput(body: Body): Body {
-	const text = promptText(body).trim();
-	const { input: _input, messages: _messages, instructions: _instructions, ...rest } = body;
-	return { ...rest, input: text || " " } as Body;
 }
 
 async function forward(
@@ -378,7 +404,6 @@ async function withTrace(
 	response: Response,
 	decision: Decision,
 	escalated: string,
-	normalized = false,
 ): Promise<Response> {
 	// Log as well as set headers: a gateway in front of the agent may cache the
 	// answer and drop per-response headers, but the log keeps the decision on record.
@@ -396,7 +421,6 @@ async function withTrace(
 		tier: decision.tier,
 		why: decision.why,
 	};
-	if (normalized) router.input_normalized = true;
 	if (decision.pool) router.pool = decision.pool.slice(0, 900);
 	if (decision.degraded.length > 0) router.degraded = decision.degraded;
 	if (escalated) router.escalated_to = escalated;
@@ -405,12 +429,12 @@ async function withTrace(
 	headers.set("x-router-model", decision.model);
 	headers.set("x-router-tier", decision.tier);
 	headers.set("x-router-why", decision.why.slice(0, 900));
-	if (decision.pool) headers.set("x-router-pool", decision.pool.slice(0, 900));
+	if (decision.pool)
+		headers.set("x-router-pool", decision.pool.slice(0, 900));
 	if (decision.degraded.length > 0) {
 		headers.set("x-router-degraded", decision.degraded.join(", "));
 	}
 	if (escalated) headers.set("x-router-escalated-to", escalated);
-	if (normalized) headers.set("x-router-input-normalized", "true");
 
 	// A JSON answer also carries the trace in the body, so a caller that never sees
 	// response headers can still check the routing. Streamed answers are passed
@@ -423,12 +447,20 @@ async function withTrace(
 			headers,
 		});
 	}
+	// The trace changes the JSON body size; preserve the length only for streams.
+	headers.delete("content-length");
 	try {
 		const payload = (await response.json()) as Record<string, unknown>;
-		return Response.json({ ...payload, router }, { status: response.status, headers });
+		return Response.json(
+			{ ...payload, router },
+			{ status: response.status, headers },
+		);
 	} catch {
 		return Response.json(
-			{ error: { message: "Router could not read the model answer" }, router },
+			{
+				error: { message: "Router could not read the model answer" },
+				router,
+			},
 			{ status: response.status, headers },
 		);
 	}
@@ -444,7 +476,6 @@ export default async function agent({
 
 	let decision = pick(start.tier, body, signals);
 	let escalated = "";
-	let normalized = false;
 	let last: Response | null = null;
 
 	for (const tier of [start.tier, ...ESCALATION[start.tier]]) {
@@ -455,25 +486,30 @@ export default async function agent({
 		let response: Response | null = null;
 		try {
 			response = await forward(body, decision.model, pollinations);
-			// 422: the upstream would not take a message array. Same ask, plain prompt.
-			if (response.status === 422) {
-				normalized = true;
-				response = await forward(flattenInput(body), decision.model, pollinations);
-			}
 		} catch {
 			response = null;
 		}
-		if (response && response.status !== 429 && response.status < 500 && response.status !== 422) {
-			return await withTrace(response, decision, escalated, normalized);
+		if (
+			response &&
+			response.status !== 429 &&
+			response.status < 500 &&
+			response.status !== 422
+		) {
+			return await withTrace(response, decision, escalated);
 		}
 		last = response;
 	}
 
 	if (!last) {
 		return Response.json(
-			{ error: { message: "Router could not reach any model", type: "router_error" } },
+			{
+				error: {
+					message: "Router could not reach any model",
+					type: "router_error",
+				},
+			},
 			{ status: 502, headers: { "x-router-model": decision.model } },
 		);
 	}
-	return await withTrace(last, decision, escalated, normalized);
+	return await withTrace(last, decision, escalated);
 }
